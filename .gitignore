@@ -1,0 +1,23 @@
+# Unreal Engine generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+
+# IDE
+.vs/
+.vscode/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Internal AI project memory (local only)
+CLAUDE.md
