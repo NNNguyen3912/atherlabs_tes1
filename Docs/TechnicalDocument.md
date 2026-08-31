@@ -9,7 +9,7 @@
 
 A third-person hack-and-slash prototype focused on montage-driven melee combos, built on the ThirdPerson template with the free RamsterZ bare-handed animation set (retargeted UE4 Mannequin → UE5 Manny via IK Retargeter).
 
-Current deliverable: **two chained bare-handed combos** — a 4-hit ground chain (LMB) and a distinct skill chain (E) with its own move set — with mid-chain branching in both directions, flavor-aware input buffering, impact-timed chain windows, root-motion forward drive, and movement lock during attacks. The architecture makes every remaining combat feature (launcher, air combo) a *data extension*, not new logic. Transition polish between the two chains is functional and still being tuned.
+Current deliverable: the **complete melee moveset** — a 4-hit ground chain (LMB), a distinct skill chain (E), a launcher (RMB) that pops the character airborne, a post-launcher **air juggle chain**, and a **dive attack** from free fall — all mid-chain cancellable into each other through a shared window/buffer system. Flavor-aware input buffering, impact-timed chain windows, root-motion drive with per-attack translation scaling, and movement lock during attacks. The architecture makes each move a *data extension*, not new logic. Seam polish between lanes is functional and still being tuned.
 
 ## 2. Architecture
 
@@ -35,7 +35,9 @@ flowchart LR
   ARR --> EV
 ```
 
-**Flow:** each attack key either starts its chain (`StartCombo` with the matching montage array), advances/switches chains if the chain window is open (`AdvanceGround` / `AdvanceSkill`), or is **buffered by key** and auto-consumed the moment the window opens. Each montage carries one `ANS_ComboWindow` notify-state strip that opens/closes the window by calling back into the character. `On Completed` of the final montage resets all state; `On Interrupted` is deliberately unhandled — the next attack interrupting the previous one *is* the chain mechanism.
+**Flow:** each attack key either starts its lane (`StartCombo` with the matching montage array, or `DoLauncher`/`DoAirDive` for the single-move lanes), advances/switches lanes if the chain window is open (`AdvanceGround` / `AdvanceSkill` / `DoLauncher`), or is **buffered by key** (`BufferedInput`: none/attack/skill/launcher) and auto-consumed the moment the window opens. Each montage carries one `ANS_ComboWindow` notify-state strip that opens/closes the window by calling back into the character. `On Completed` of the final montage resets all state; `On Interrupted` is deliberately unhandled — the next attack interrupting the previous one *is* the chain mechanism.
+
+**Aerial rules:** the launcher montage fires a `Launch` anim-notify at the kick's measured contact frame, which `LaunchCharacter`s the character upward and sets a `bLaunched` flag. While launched, LMB plays the low-gravity air juggle chain (2 hits); from a plain jump or free fall, LMB instead performs a forward-spinning dive (physics-driven: forward + downward launch impulse, root motion disabled on that clip). Landing restores gravity and resets combat state.
 
 ## 3. Key design decisions
 
@@ -72,15 +74,23 @@ The two chains (LMB ground, E skill) share one state machine. Pressing the *othe
 
 The input buffer records **which key** was pressed (`BufferedInput`: none / attack / skill), not just that something was pressed. This is what makes finisher-chaining reliable: spamming E around the last ground hit always enters the skill chain the instant that hit's window opens, instead of dying on an index overflow. Known remaining polish: the visual seam between the ground finisher pose and the skill opener is acceptable but not perfect — being tuned via per-montage blend-in times and segment cut points.
 
+### 3.6 Launcher as a first-class lane, and tunable root motion
+
+The launcher initially lived outside the window/buffer system (only usable from idle), which broke combo rhythm — chaining ground → launcher stalled for one beat. Promoting it to a first-class lane (reachable through the same chain window, with its own buffer slot) removed the stall: any lane can cancel into the launcher on the next window, exactly like lane-to-lane switches.
+
+For per-attack movement tuning, a reusable `ANS_RootMotionScale` notify-state calls `SetAnimRootMotionTranslationScale` on begin/end with an **instance-editable** scale value — each strip placed on a montage carries its own multiplier, so travel distance of individual hits (e.g. the skill chain's far-reaching finishers) is tuned per-attack in data, with a safety reset in `ResetCombo`.
+
 ## 4. Tooling note
 
 The editor was driven partly through the Remote Control API (HTTP + Python): batch property edits (blend times, root motion flags), remote Blueprint compilation checks, per-frame PIE state tracing to diagnose the blend-out/window interaction, and the bone-sampling measurement in §3.2. All timing values in this document come from those measurements rather than estimation.
+
+Blueprint graphs were additionally audited as text: UE's node clipboard format (Ctrl+A/Ctrl+C in a graph) is a complete T3D description of nodes, pins and links, which was exported and machine-checked against the intended design — catching an unlinked mesh pin, an orphaned node and a truncated reset chain that visual inspection had missed.
 
 ## 5. Roadmap to full test scope
 
 | Requirement | Plan |
 |---|---|
-| 5+ attack combinations, ground 3+ / air 2+ | **Done:** ground 4-hit chain, skill chain (E), mid-chain branch both directions, finisher-chain from last ground hit. **Remaining:** RMB launcher + aerial montage pair gated by `State.InAir` |
+| 5+ attack combinations, ground 3+ / air 2+ | **Done (7 combinations):** ground 4-hit chain, skill chain, lane branches both directions, launcher, launcher → 2-hit air juggle, free-fall dive. Feel-tuning ongoing |
 | GAS: HP/Stamina + effects | C++ `UCombatAttributeSet` (Health/Stamina) + ASC on a shared character base; combo moves into a GameplayAbility; stamina cost via Cost GE; poison DoT as periodic GE with GameplayCue visual |
 | Dynamic camera | SpringArm lag + combat-aware arm length/FOV interp + hit camera shake (collision test built-in) |
 | HUD | UMG bound to attribute-change delegates; combo counter driven by hit events |
@@ -89,4 +99,4 @@ The editor was driven partly through the Remote Control API (HTTP + Python): bat
 ## 6. How to run
 
 1. Unreal Engine 5.4.4, open `aether_test.uproject`, press Play.
-2. **LMB** — ground combo chain (4 hits). **E** — skill combo chain; press mid-chain to branch, or around the ground finisher to chain straight into the skill string. Both mash-friendly (per-key input buffering). Movement: WASD + Space (template).
+2. **LMB** — ground combo chain (4 hits); in the air: juggle chain after a launcher, dive attack from a plain jump. **E** — skill combo chain; press mid-chain to branch either way. **RMB** — launcher kick (pops you airborne; chainable mid-combo). All mash-friendly (per-key input buffering). Movement: WASD + Space.
