@@ -21,6 +21,8 @@ class AETHER_TEST_API UCombatAttributeSet : public UAttributeSet
 	GENERATED_BODY()
 
 public:
+	UCombatAttributeSet();
+
 	UPROPERTY(BlueprintReadOnly, Category = "Attributes")
 	FGameplayAttributeData Health;
 	ATTRIBUTE_ACCESSORS(UCombatAttributeSet, Health)
@@ -37,6 +39,12 @@ public:
 	FGameplayAttributeData MaxStamina;
 	ATTRIBUTE_ACCESSORS(UCombatAttributeSet, MaxStamina)
 
-	// Clamp truoc khi gia tri doi: khong cho HP/Stamina am hoac vuot Max
+	// Clamp CurrentValue (buff/debuff duration-based)
 	virtual void PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue) override;
+
+	// Clamp BaseValue (GE Instant: stamina cost, poison tick... di duong nay)
+	virtual void PreAttributeBaseChange(const FGameplayAttribute& Attribute, float& NewValue) const override;
+
+private:
+	void ClampAttribute(const FGameplayAttribute& Attribute, float& NewValue) const;
 };

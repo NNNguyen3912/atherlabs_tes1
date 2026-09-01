@@ -38,6 +38,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "GAS")
 	TArray<TSubclassOf<UGameplayEffect>> StartupEffects;
 
+	/** GE Instant tru stamina, magnitude SetByCaller tag Data.StaminaCost — gan GE_StaminaCost trong BP con */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "GAS")
+	TSubclassOf<UGameplayEffect> StaminaCostEffect;
+
+	/**
+	 * Goi truoc moi don danh: du stamina thi tru va tra true, thieu thi khong tru va tra false.
+	 * BP: Branch truoc Play Montage.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "GAS")
+	bool TryPayStamina(float Cost);
+
+	/** Apply 1 GE len chinh minh (poison DoT, buff...). Tra handle de remove som neu can. */
+	UFUNCTION(BlueprintCallable, Category = "GAS")
+	FActiveGameplayEffectHandle ApplyEffectToSelf(TSubclassOf<UGameplayEffect> EffectClass, float Level = 1.f);
+
+	UFUNCTION(BlueprintPure, Category = "GAS")
+	float GetHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "GAS")
+	float GetMaxHealth() const;
+
+	UFUNCTION(BlueprintPure, Category = "GAS")
+	float GetStamina() const;
+
+	UFUNCTION(BlueprintPure, Category = "GAS")
+	float GetMaxStamina() const;
+
 protected:
 	virtual void BeginPlay() override;
 
