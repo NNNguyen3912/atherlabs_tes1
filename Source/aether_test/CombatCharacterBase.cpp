@@ -1,10 +1,18 @@
 #include "CombatCharacterBase.h"
+#include "CombatPlayerHUDWidget.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Blueprint/UserWidget.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Components/ProgressBar.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/WidgetComponent.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 #include "GameplayEffect.h"
 #include "GameplayAbilitySpec.h"
+#include "TimerManager.h"
 
 ACombatCharacterBase::ACombatCharacterBase()
 {
@@ -12,12 +20,26 @@ ACombatCharacterBase::ACombatCharacterBase()
 
 	ASC = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("ASC"));
 	Attributes = CreateDefaultSubobject<UCombatAttributeSet>(TEXT("Attributes"));
+	PlayerHUDClass = UCombatPlayerHUDWidget::StaticClass();
 }
 
 void ACombatCharacterBase::BeginPlay()
 {
 	Super::BeginPlay();
 	InitAbilitySystem();
+	CreatePlayerHUDIfNeeded();
+}
+
+void ACombatCharacterBase::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	CreatePlayerHUDIfNeeded();
+}
+
+void ACombatCharacterBase::OnRep_Controller()
+{
+	Super::OnRep_Controller();
+	CreatePlayerHUDIfNeeded();
 }
 
 void ACombatCharacterBase::InitAbilitySystem()
@@ -106,7 +128,7 @@ FActiveGameplayEffectHandle ACombatCharacterBase::ApplyEffectToSelf(TSubclassOf<
 	return ASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
 }
 
-bool ACombatCharacterBase::ApplyDamageToTarget(ACombatCharacterBase* Target, float Damage)
+bool ACombatCharacterBase::ApplyDamageToTarget(ACombatCharacterBase* Target, float Damage, bool bPlayHitReaction)
 {
 	if (!Target || Target->bIsDead || bIsDead || Damage <= 0.f)
 	{
@@ -136,8 +158,15 @@ bool ACombatCharacterBase::ApplyDamageToTarget(ACombatCharacterBase* Target, flo
 		FGameplayTag::RequestGameplayTag(TEXT("Data.Damage")), -Damage);
 	ASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
 
-	Target->PlayHitReaction();
-	Target->OnMeleeHitReceived(this);
+	if (!Target->bIsDead && bPlayHitReaction)
+	{
+		Target->PlayHitReaction();
+		Target->OnMeleeHitReceived(this);
+	}
+	if (IsPlayerControlled())
+	{
+		RegisterConfirmedHit();
+	}
 	return true;
 }
 
@@ -149,6 +178,56 @@ void ACombatCharacterBase::PlayHitReaction()
 	}
 }
 
+void ACombatCharacterBase::ApplyCombatLaunch(float LaunchZ)
+{
+	if (bIsDead || LaunchZ <= 0.f)
+	{
+		return;
+	}
+
+	if (AController* OwningController = GetController())
+	{
+		OwningController->StopMovement();
+	}
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+	}
+
+	PlayLaunchReaction();
+	LaunchCharacter(FVector(0.f, 0.f, LaunchZ), false, true);
+	OnCombatLaunched(LaunchZ);
+}
+
+void ACombatCharacterBase::PlayLaunchReaction()
+{
+	if (LaunchReactionMontage)
+	{
+		PlayAnimMontage(LaunchReactionMontage);
+		return;
+	}
+
+	UAnimSequenceBase* ReactionAnimation = LaunchReactionAnimation;
+	if (!ReactionAnimation)
+	{
+		// Existing placed BP_Enemy actors can retain a pre-property-addition null override.
+		// Keep the launcher readable until a bespoke authored reaction is assigned in the Blueprint.
+		ReactionAnimation = LoadObject<UAnimSequenceBase>(nullptr,
+			TEXT("/Game/Characters/Mannequins/Animations/Manny/MM_Fall_Loop.MM_Fall_Loop"));
+	}
+
+	if (ReactionAnimation)
+	{
+		// A dynamic montage lets the project use Manny's existing falling pose now, while retaining
+		// a clean authored-montage override slot for the later animation pass.
+		if (UAnimMontage* DynamicMontage = UAnimMontage::CreateSlotAnimationAsDynamicMontage(
+			ReactionAnimation, TEXT("DefaultSlot"), 0.04f, 0.12f, 1.f, 1))
+		{
+			PlayAnimMontage(DynamicMontage);
+		}
+	}
+}
+
 void ACombatCharacterBase::HandleHealthChanged(const FOnAttributeChangeData& Data)
 {
 	const float MaxHealth = GetMaxHealth();
@@ -157,7 +236,58 @@ void ACombatCharacterBase::HandleHealthChanged(const FOnAttributeChangeData& Dat
 	if (Data.NewValue <= 0.f && !bIsDead)
 	{
 		bIsDead = true;
+		HandleCombatDeath();
+		OnCharacterDied.Broadcast(this);
 		OnDeath();
+	}
+}
+
+void ACombatCharacterBase::HandleCombatDeath()
+{
+	if (bStopMovementOnDeath)
+	{
+		if (AController* OwningController = GetController())
+		{
+			OwningController->StopMovement();
+		}
+		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		{
+			Movement->StopMovementImmediately();
+			Movement->DisableMovement();
+		}
+		// This blocks a Tick-driven child Blueprint from scheduling a fresh MoveTo after death.
+		SetActorTickEnabled(false);
+	}
+
+	if (bHideHealthWidgetsOnDeath)
+	{
+		TInlineComponentArray<UWidgetComponent*> WidgetComponents(this);
+		GetComponents(WidgetComponents);
+		for (UWidgetComponent* WidgetComponent : WidgetComponents)
+		{
+			if (WidgetComponent)
+			{
+				WidgetComponent->SetVisibility(false, true);
+			}
+		}
+	}
+
+	if (bRagdollOnDeath)
+	{
+		if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+		{
+			CharacterMesh->SetCollisionProfileName(TEXT("Ragdoll"));
+			CharacterMesh->SetSimulatePhysics(true);
+		}
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+		{
+			Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
+
+	if (DeathDespawnDelay > 0.f)
+	{
+		SetLifeSpan(DeathDespawnDelay);
 	}
 }
 
@@ -189,6 +319,50 @@ void ACombatCharacterBase::UpdateHealthWidgets(float NewHealth, float NewMaxHeal
 void ACombatCharacterBase::HandleStaminaChanged(const FOnAttributeChangeData& Data)
 {
 	OnStaminaChanged.Broadcast(Data.NewValue, GetMaxStamina());
+}
+
+void ACombatCharacterBase::RegisterConfirmedHit()
+{
+	++ComboCount;
+	OnComboChanged.Broadcast(ComboCount);
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ComboResetTimer);
+		World->GetTimerManager().SetTimer(ComboResetTimer, this, &ACombatCharacterBase::ResetCombo,
+			FMath::Max(0.1f, ComboResetDelay), false);
+	}
+}
+
+void ACombatCharacterBase::ResetCombo()
+{
+	if (ComboCount == 0)
+	{
+		return;
+	}
+	ComboCount = 0;
+	OnComboChanged.Broadcast(ComboCount);
+}
+
+void ACombatCharacterBase::CreatePlayerHUDIfNeeded()
+{
+	if (PlayerHUD || !PlayerHUDClass || !IsPlayerControlled())
+	{
+		return;
+	}
+
+	APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	if (!PlayerController || !PlayerController->IsLocalController())
+	{
+		return;
+	}
+
+	PlayerHUD = CreateWidget<UCombatPlayerHUDWidget>(PlayerController, PlayerHUDClass);
+	if (PlayerHUD)
+	{
+		PlayerHUD->InitializeForCharacter(this);
+		PlayerHUD->AddToViewport();
+	}
 }
 
 float ACombatCharacterBase::GetHealth() const

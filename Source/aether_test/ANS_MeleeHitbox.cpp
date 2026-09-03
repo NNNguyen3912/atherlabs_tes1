@@ -91,7 +91,8 @@ void UANS_MeleeHitbox::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenc
 
 		// Poison/launch chi di kem cu danh THANH CONG — attacker chet giua chung
 		// hay nan nhan da chet thi khong duoc dinh gi them
-		if (!Attacker->ApplyDamageToTarget(Victim, Damage))
+		const bool bIsLauncher = LaunchZ > 0.f;
+		if (!Attacker->ApplyDamageToTarget(Victim, Damage, !bIsLauncher))
 		{
 			continue;
 		}
@@ -103,9 +104,9 @@ void UANS_MeleeHitbox::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenc
 		{
 			Victim->ApplyEffectToSelf(ExtraEffectOnHit);
 		}
-		if (LaunchZ > 0.f && !Victim->bIsDead)
+		if (bIsLauncher && !Victim->bIsDead)
 		{
-			Victim->LaunchCharacter(FVector(0.f, 0.f, LaunchZ), false, true);
+			Victim->ApplyCombatLaunch(LaunchZ);
 		}
 	}
 }

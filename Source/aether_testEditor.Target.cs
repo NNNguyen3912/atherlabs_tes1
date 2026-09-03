@@ -10,6 +10,6 @@ public class aether_testEditorTarget : TargetRules
 		Type = TargetType.Editor;
 		DefaultBuildSettings = BuildSettingsVersion.V5;
 
-		ExtraModuleNames.AddRange( new string[] { "aether_test" } );
+		ExtraModuleNames.AddRange( new string[] { "aether_test", "aether_testEditor" } );
 	}
 }

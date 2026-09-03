@@ -2,9 +2,10 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "GameplayEffect.h"
+#include "Templates/SubclassOf.h"
 #include "ANS_MeleeHitbox.generated.h"
 
-class UGameplayEffect;
 class ACombatCharacterBase;
 
 /**
