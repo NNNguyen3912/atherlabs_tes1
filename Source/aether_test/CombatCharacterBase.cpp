@@ -1,5 +1,6 @@
 #include "CombatCharacterBase.h"
 #include "CombatPlayerHUDWidget.h"
+#include "Animation/AnimInstance.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/CapsuleComponent.h"
@@ -10,13 +11,14 @@
 #include "GameFramework/Controller.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameplayEffect.h"
 #include "GameplayAbilitySpec.h"
 #include "TimerManager.h"
 
 ACombatCharacterBase::ACombatCharacterBase()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
 
 	ASC = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("ASC"));
 	Attributes = CreateDefaultSubobject<UCombatAttributeSet>(TEXT("Attributes"));
@@ -27,18 +29,46 @@ void ACombatCharacterBase::BeginPlay()
 {
 	Super::BeginPlay();
 	InitAbilitySystem();
-	CreatePlayerHUDIfNeeded();
+
+	// BeginPlay can run before the local game viewport/subsystem is ready.
+	// Defer the first attempt so AddToViewport has a valid screen target.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimerForNextTick(this, &ACombatCharacterBase::CreatePlayerHUDIfNeeded);
+	}
+}
+
+void ACombatCharacterBase::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	UpdateCombatFacing(DeltaSeconds);
+}
+
+void ACombatCharacterBase::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	if (ActiveLaunchReactionMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			AnimInstance->Montage_Stop(0.08f, ActiveLaunchReactionMontage);
+		}
+		ActiveLaunchReactionMontage = nullptr;
+	}
 }
 
 void ACombatCharacterBase::PossessedBy(AController* NewController)
 {
 	Super::PossessedBy(NewController);
+	InitializePlayerStartingStamina();
 	CreatePlayerHUDIfNeeded();
 }
 
 void ACombatCharacterBase::OnRep_Controller()
 {
 	Super::OnRep_Controller();
+	InitializePlayerStartingStamina();
 	CreatePlayerHUDIfNeeded();
 }
 
@@ -55,6 +85,9 @@ void ACombatCharacterBase::InitAbilitySystem()
 		.AddUObject(this, &ACombatCharacterBase::HandleHealthChanged);
 	ASC->GetGameplayAttributeValueChangeDelegate(Attributes->GetStaminaAttribute())
 		.AddUObject(this, &ACombatCharacterBase::HandleStaminaChanged);
+
+	EnsureInitialAttributes();
+	InitializePlayerStartingStamina();
 
 	for (const TSubclassOf<UGameplayEffect>& EffectClass : StartupEffects)
 	{
@@ -81,21 +114,70 @@ void ACombatCharacterBase::InitAbilitySystem()
 	}
 }
 
+void ACombatCharacterBase::EnsureInitialAttributes()
+{
+	if (!ASC || !Attributes)
+	{
+		return;
+	}
+
+	// Older child Blueprints can retain a serialized zero Health even though the
+	// native AttributeSet constructor now defaults it to 100.  Do not overwrite
+	// authored non-zero stats; only repair a missing value when the actor spawns.
+	if (Attributes->GetMaxHealth() <= KINDA_SMALL_NUMBER)
+	{
+		ASC->SetNumericAttributeBase(Attributes->GetMaxHealthAttribute(), 100.f);
+	}
+	if (Attributes->GetHealth() <= KINDA_SMALL_NUMBER)
+	{
+		ASC->SetNumericAttributeBase(Attributes->GetHealthAttribute(), Attributes->GetMaxHealth());
+	}
+	if (Attributes->GetMaxStamina() <= KINDA_SMALL_NUMBER)
+	{
+		ASC->SetNumericAttributeBase(Attributes->GetMaxStaminaAttribute(), 100.f);
+	}
+	if (Attributes->GetStamina() <= KINDA_SMALL_NUMBER)
+	{
+		ASC->SetNumericAttributeBase(Attributes->GetStaminaAttribute(), Attributes->GetMaxStamina());
+	}
+}
+
+void ACombatCharacterBase::InitializePlayerStartingStamina()
+{
+	if (bPlayerStartingStaminaApplied || !IsPlayerControlled() || !ASC || !Attributes)
+	{
+		return;
+	}
+
+	const float MaxStamina = Attributes->GetMaxStamina();
+	if (MaxStamina <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	ASC->SetNumericAttributeBase(Attributes->GetStaminaAttribute(), MaxStamina * 0.5f);
+	bPlayerStartingStaminaApplied = true;
+}
+
 bool ACombatCharacterBase::TryPayStamina(float Cost)
 {
 	if (Cost <= 0.f)
 	{
 		return true;
 	}
-	if (!ASC || !Attributes || !StaminaCostEffect)
-	{
-		// Chua wire GE_StaminaCost thi khong chan combo — chi bao loi ra log
-		UE_LOG(LogTemp, Warning, TEXT("TryPayStamina: StaminaCostEffect chua duoc gan tren %s"), *GetName());
-		return true;
-	}
-	if (Attributes->GetStamina() < Cost)
+	if (!ASC || !Attributes)
 	{
 		return false;
+	}
+	if (Attributes->GetStamina() + KINDA_SMALL_NUMBER < Cost)
+	{
+		return false;
+	}
+
+	if (!StaminaCostEffect)
+	{
+		ASC->SetNumericAttributeBase(Attributes->GetStaminaAttribute(), Attributes->GetStamina() - Cost);
+		return true;
 	}
 
 	FGameplayEffectContextHandle Context = ASC->MakeEffectContext();
@@ -103,6 +185,7 @@ bool ACombatCharacterBase::TryPayStamina(float Cost)
 	const FGameplayEffectSpecHandle Spec = ASC->MakeOutgoingSpec(StaminaCostEffect, 1.f, Context);
 	if (!Spec.IsValid())
 	{
+		ASC->SetNumericAttributeBase(Attributes->GetStaminaAttribute(), Attributes->GetStamina() - Cost);
 		return true;
 	}
 	// GE cong them gia tri am = tru stamina
@@ -110,6 +193,49 @@ bool ACombatCharacterBase::TryPayStamina(float Cost)
 		FGameplayTag::RequestGameplayTag(TEXT("Data.StaminaCost")), -Cost);
 	ASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
 	return true;
+}
+
+bool ACombatCharacterBase::TryPayFullStamina()
+{
+	if (!ASC || !Attributes)
+	{
+		return false;
+	}
+
+	const float RequiredStamina = FMath::Max(0.f, SkillComboTotalCost);
+	if (RequiredStamina <= KINDA_SMALL_NUMBER)
+	{
+		return true;
+	}
+	if (Attributes->GetStamina() + KINDA_SMALL_NUMBER < RequiredStamina)
+	{
+		return false;
+	}
+
+	// Spending is performed by each E hitbox window so interruption/whiffing does
+	// not burn the entire combo up front. The old Blueprint node name is kept for
+	// compatibility with the authored input graph.
+	return true;
+}
+
+void ACombatCharacterBase::RestoreStamina(float Amount)
+{
+	if (Amount <= 0.f || !ASC || !Attributes)
+	{
+		return;
+	}
+
+	const float MaxStamina = Attributes->GetMaxStamina();
+	ASC->SetNumericAttributeBase(
+		Attributes->GetStaminaAttribute(),
+		FMath::Clamp(Attributes->GetStamina() + Amount, 0.f, MaxStamina));
+}
+
+float ACombatCharacterBase::GetSkillComboHitCost() const
+{
+	return SkillComboHitCount > 0
+		? FMath::Max(0.f, SkillComboTotalCost) / static_cast<float>(SkillComboHitCount)
+		: FMath::Max(0.f, SkillComboTotalCost);
 }
 
 FActiveGameplayEffectHandle ACombatCharacterBase::ApplyEffectToSelf(TSubclassOf<UGameplayEffect> EffectClass, float Level)
@@ -156,7 +282,14 @@ bool ACombatCharacterBase::ApplyDamageToTarget(ACombatCharacterBase* Target, flo
 	// GE cong gia tri am vao Health = tru mau
 	Spec.Data->SetSetByCallerMagnitude(
 		FGameplayTag::RequestGameplayTag(TEXT("Data.Damage")), -Damage);
+	const float HealthBefore = Target->GetHealth();
 	ASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
+	if (Target->GetHealth() >= HealthBefore - KINDA_SMALL_NUMBER)
+	{
+		// A notify must not count a capsule overlap or a malformed/zero-impact GE
+		// as a confirmed hit. Extra effects such as poison are gated by this return.
+		return false;
+	}
 
 	if (!Target->bIsDead && bPlayHitReaction)
 	{
@@ -172,10 +305,17 @@ bool ACombatCharacterBase::ApplyDamageToTarget(ACombatCharacterBase* Target, flo
 
 void ACombatCharacterBase::PlayHitReaction()
 {
-	if (!bIsDead && HitReactionMontage)
+	if (bIsDead || !HitReactionMontage)
 	{
-		PlayAnimMontage(HitReactionMontage);
+		return;
 	}
+
+	if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+	{
+		AnimInstance->Montage_Stop(0.04f, HitReactionMontage);
+	}
+
+	PlayAnimMontage(HitReactionMontage);
 }
 
 void ACombatCharacterBase::ApplyCombatLaunch(float LaunchZ)
@@ -199,10 +339,39 @@ void ACombatCharacterBase::ApplyCombatLaunch(float LaunchZ)
 	OnCombatLaunched(LaunchZ);
 }
 
+void ACombatCharacterBase::ApplyCombatKnockback(FVector Direction, float HorizontalStrength, float LiftZ)
+{
+	if (bIsDead || HorizontalStrength <= 0.f)
+	{
+		return;
+	}
+
+	Direction.Z = 0.f;
+	if (!Direction.Normalize())
+	{
+		return;
+	}
+
+	if (AController* OwningController = GetController())
+	{
+		OwningController->StopMovement();
+	}
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+	}
+
+	LaunchCharacter(
+		Direction * HorizontalStrength + FVector::UpVector * FMath::Max(0.f, LiftZ),
+		true,
+		LiftZ > 0.f);
+}
+
 void ACombatCharacterBase::PlayLaunchReaction()
 {
 	if (LaunchReactionMontage)
 	{
+		ActiveLaunchReactionMontage = LaunchReactionMontage;
 		PlayAnimMontage(LaunchReactionMontage);
 		return;
 	}
@@ -223,6 +392,7 @@ void ACombatCharacterBase::PlayLaunchReaction()
 		if (UAnimMontage* DynamicMontage = UAnimMontage::CreateSlotAnimationAsDynamicMontage(
 			ReactionAnimation, TEXT("DefaultSlot"), 0.04f, 0.12f, 1.f, 1))
 		{
+			ActiveLaunchReactionMontage = DynamicMontage;
 			PlayAnimMontage(DynamicMontage);
 		}
 	}
@@ -346,7 +516,7 @@ void ACombatCharacterBase::ResetCombo()
 
 void ACombatCharacterBase::CreatePlayerHUDIfNeeded()
 {
-	if (PlayerHUD || !PlayerHUDClass || !IsPlayerControlled())
+	if (!IsPlayerControlled())
 	{
 		return;
 	}
@@ -357,12 +527,111 @@ void ACombatCharacterBase::CreatePlayerHUDIfNeeded()
 		return;
 	}
 
-	PlayerHUD = CreateWidget<UCombatPlayerHUDWidget>(PlayerController, PlayerHUDClass);
+	// The first call can happen before the viewport subsystem exists. Keep the
+	// widget and retry the viewport attachment on PossessedBy/next-tick calls.
+	if (PlayerHUD)
+	{
+		if (!PlayerHUD->IsInViewport())
+		{
+			PlayerHUD->SetVisibility(ESlateVisibility::Visible);
+			PlayerHUD->AddToViewport(100);
+		}
+		if (PlayerHUD->IsInViewport())
+		{
+			PlayerHUD->SetDesiredSizeInViewport(FVector2D(480.f, 240.f));
+		}
+		return;
+	}
+
+	TSubclassOf<UCombatPlayerHUDWidget> HUDClass = PlayerHUDClass;
+	if (!HUDClass)
+	{
+		HUDClass = UCombatPlayerHUDWidget::StaticClass();
+	}
+	PlayerHUD = CreateWidget<UCombatPlayerHUDWidget>(PlayerController, HUDClass);
 	if (PlayerHUD)
 	{
 		PlayerHUD->InitializeForCharacter(this);
-		PlayerHUD->AddToViewport();
+		PlayerHUD->SetVisibility(ESlateVisibility::Visible);
+		PlayerHUD->AddToViewport(100);
+		// Native CanvasPanel widgets can report a zero desired size when they only
+		// contain fixed CanvasSlots. Give the screen slot an explicit footprint so
+		// the player HUD cannot be created successfully but render as zero pixels.
+		PlayerHUD->SetDesiredSizeInViewport(FVector2D(480.f, 240.f));
+		UE_LOG(LogTemp, Display, TEXT("Player HUD created for %s (%s), in viewport: %s"),
+			*GetName(), *GetNameSafe(HUDClass), PlayerHUD->IsInViewport() ? TEXT("yes") : TEXT("no"));
 	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Player HUD creation failed for %s (%s)"), *GetName(), *GetNameSafe(HUDClass));
+	}
+}
+
+void ACombatCharacterBase::UpdateCombatFacing(float DeltaSeconds)
+{
+	if (!bAutoFaceNearestEnemy || bIsDead || !IsPlayerControlled())
+	{
+		return;
+	}
+
+	const UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	if (!AnimInstance || !AnimInstance->GetCurrentActiveMontage())
+	{
+		CurrentCombatTarget = nullptr;
+		return;
+	}
+
+	const float MaxDistanceSquared = FMath::Square(AutoFaceRange);
+	if (!IsValid(CurrentCombatTarget) || CurrentCombatTarget->bIsDead || CurrentCombatTarget->IsPlayerControlled()
+		|| FVector::DistSquared2D(GetActorLocation(), CurrentCombatTarget->GetActorLocation()) > MaxDistanceSquared)
+	{
+		CurrentCombatTarget = FindNearestCombatTarget();
+	}
+
+	if (!CurrentCombatTarget)
+	{
+		return;
+	}
+
+	FVector ToTarget = CurrentCombatTarget->GetActorLocation() - GetActorLocation();
+	ToTarget.Z = 0.f;
+	if (ToTarget.IsNearlyZero())
+	{
+		return;
+	}
+
+	FRotator DesiredRotation = ToTarget.Rotation();
+	DesiredRotation.Pitch = 0.f;
+	DesiredRotation.Roll = 0.f;
+	SetActorRotation(FMath::RInterpTo(GetActorRotation(), DesiredRotation, DeltaSeconds, AutoFaceTurnSpeed));
+}
+
+ACombatCharacterBase* ACombatCharacterBase::FindNearestCombatTarget() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	ACombatCharacterBase* NearestTarget = nullptr;
+	float BestDistanceSquared = FMath::Square(AutoFaceRange);
+	for (TActorIterator<ACombatCharacterBase> It(World); It; ++It)
+	{
+		ACombatCharacterBase* Candidate = *It;
+		if (Candidate == this || Candidate->bIsDead || Candidate->IsPlayerControlled())
+		{
+			continue;
+		}
+
+		const float DistanceSquared = FVector::DistSquared2D(GetActorLocation(), Candidate->GetActorLocation());
+		if (DistanceSquared < BestDistanceSquared)
+		{
+			BestDistanceSquared = DistanceSquared;
+			NearestTarget = Candidate;
+		}
+	}
+	return NearestTarget;
 }
 
 float ACombatCharacterBase::GetHealth() const

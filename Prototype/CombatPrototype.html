@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aether Combat Feel Prototype</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #09101c; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; background: #0d1727; }
+    #hud { position: fixed; inset: 0; pointer-events: none; padding: 18px; text-shadow: 0 2px 3px #000; }
+    .panel { width: min(350px, 42vw); padding: 14px; border: 1px solid #405575; border-radius: 10px; background: #101c2ddd; box-shadow: 0 8px 32px #0007; }
+    .title { font-size: 18px; font-weight: 800; letter-spacing: .04em; color: #b9d8ff; }
+    .sub { color: #91a8c7; font-size: 12px; margin: 3px 0 12px; }
+    .label { display: flex; justify-content: space-between; font-size: 12px; margin: 7px 0 4px; color: #d7e5fb; }
+    .bar { height: 12px; overflow: hidden; border-radius: 99px; background: #293750; border: 1px solid #4a6288; }
+    .fill { height: 100%; width: 100%; transition: width .08s linear; }
+    #hpFill { background: linear-gradient(90deg, #e94b62, #ff7b5d); }
+    #staminaFill { background: linear-gradient(90deg, #37b7e8, #a1f5ff); }
+    #combo { margin-top: 10px; font-size: 20px; font-weight: 800; color: #ffdc77; min-height: 25px; }
+    #status { color: #b7e5ff; font-size: 13px; min-height: 18px; }
+    #help { position: fixed; right: 18px; top: 18px; width: min(300px, 35vw); padding: 13px; color: #c6d7f2; font-size: 12px; line-height: 1.65; border: 1px solid #405575; border-radius: 10px; background: #101c2dcc; }
+    #help b { color: #fff; }
+    #feed { position: fixed; left: 18px; bottom: 18px; width: min(360px, 45vw); color: #9db4d3; font: 12px/1.5 ui-monospace, monospace; }
+    #feed div { opacity: .85; }
+    #tip { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); color: #6f87a9; font-size: 12px; }
+    .ready { color: #9ff6ff !important; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div class="panel">
+      <div class="title">AETHER // COMBAT FEEL LAB</div>
+      <div class="sub">Web sandbox — tune timing, knockback and dodge before UE</div>
+      <div class="label"><span>PLAYER HP</span><span id="hpText">100 / 100</span></div>
+      <div class="bar"><div id="hpFill" class="fill"></div></div>
+      <div class="label"><span>STAMINA / ENERGY</span><span id="staminaText">100 / 100</span></div>
+      <div class="bar"><div id="staminaFill" class="fill"></div></div>
+      <div id="combo"></div>
+      <div id="status">Ready</div>
+    </div>
+  </div>
+  <div id="help">
+    <b>CONTROLS</b><br>
+    WASD / arrows — move<br>
+    J — 4-hit ground combo (buffer the next hit)<br>
+    K — launcher<br>
+    I — Dive (4 spinning hits + line knockback)<br>
+    E — energy combo, only at 100 stamina (E3/E4 launch back)<br>
+    Space — dodge / i-frames / attack cancel<br>
+    R — reset wave
+  </div>
+  <div id="feed"></div>
+  <div id="tip">Red rings are enemy attack frames. Dodge through them.</div>
+
+  <script>
+    'use strict';
+    const canvas = document.querySelector('#game'), ctx = canvas.getContext('2d');
+    const hpFill = document.querySelector('#hpFill'), staminaFill = document.querySelector('#staminaFill');
+    const hpText = document.querySelector('#hpText'), staminaText = document.querySelector('#staminaText');
+    const comboText = document.querySelector('#combo'), statusText = document.querySelector('#status'), feed = document.querySelector('#feed');
+    const keys = new Set(), pressed = new Set();
+    const TAU = Math.PI * 2, SKILL_COST = 100;
+    let width = 0, height = 0, last = performance.now(), hitStop = 0, shake = 0, feedItems = [];
+    const camera = { x: 0, y: 0 };
+    const player = {
+      x: 0, y: 0, facing: 1, hp: 100, maxHp: 100, stamina: 100, maxStamina: 100,
+      state: 'idle', action: null, queued: false, invuln: 0, dodgeCd: 0, hitFlash: 0, comboShown: 0
+    };
+    let enemies = [];
+    const ground = [
+      { name: 'A1', duration: .28, hitAt: .09, damage: 8, range: 76, knockback: 65 },
+      { name: 'A2', duration: .29, hitAt: .10, damage: 9, range: 78, knockback: 75 },
+      { name: 'A3', duration: .31, hitAt: .11, damage: 11, range: 82, knockback: 105 },
+      { name: 'A4', duration: .38, hitAt: .13, damage: 16, range: 88, knockback: 180 }
+    ];
+    const energy = [
+      { name: 'E1', duration: .34, hitAt: .12, damage: 13, range: 90, knockback: 0 },
+      { name: 'E2', duration: .34, hitAt: .12, damage: 14, range: 96, knockback: 0 },
+      { name: 'E3', duration: .40, hitAt: .14, damage: 20, range: 110, knockback: 245 },
+      { name: 'E4', duration: .50, hitAt: .17, damage: 28, range: 130, knockback: 340 }
+    ];
+    const launcher = { name: 'LAUNCH', duration: .38, hitAt: .12, damage: 8, range: 80, knockback: 24 };
+    const dive = { name: 'DIVE', duration: .58, hitAt: .17, hitCount: 4, hitInterval: .11, damage: 10, range: 190, knockback: 210 };
+
+    function resize() { width = canvas.width = innerWidth * devicePixelRatio; height = canvas.height = innerHeight * devicePixelRatio; canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px'; ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); }
+    addEventListener('resize', resize); resize();
+    addEventListener('keydown', event => { if (!keys.has(event.code)) pressed.add(event.code); keys.add(event.code); if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code)) event.preventDefault(); });
+    addEventListener('keyup', event => keys.delete(event.code));
+
+    function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+    function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+    function log(message) { feedItems.unshift(message); feedItems = feedItems.slice(0, 5); feed.innerHTML = feedItems.map(item => '<div>› ' + item + '</div>').join(''); }
+    function spawnWave() {
+      enemies = [-1, 0, 1].map((offset, index) => ({ id: index, x: 235 + offset * 82, y: offset * 38, r: 24, hp: 100, maxHp: 100, vx: 0, vy: 0, air: 0, airVel: 0, stun: 0, attackT: 0, attackFired: false, attackCd: .45 + index * .3, dead: false }));
+      player.x = player.y = 0; player.hp = player.maxHp; player.stamina = player.maxStamina; player.state = 'idle'; player.action = null; player.queued = false; player.invuln = 0; player.dodgeCd = 0; player.comboShown = 0; camera.x = camera.y = 0; log('Wave reset — enemies are live');
+    }
+    function nearestEnemy(maxRange = Infinity) { return enemies.filter(e => !e.dead && distance(player, e) <= maxRange).sort((a, b) => distance(player, a) - distance(player, b))[0]; }
+    function startAction(type, data, index = 0) { player.state = type; player.action = { type, data, index, t: 0, hit: false, hitCount: 0, moved: false }; player.queued = false; }
+    function tryStartAction(code) {
+      if (player.hp <= 0) return;
+      if (code === 'Space' && player.dodgeCd <= 0) return startDodge();
+      if (player.state !== 'idle') return;
+      if (code === 'KeyJ') return startAction('ground', ground[0], 0);
+      if (code === 'KeyK') return startAction('launcher', launcher);
+      if (code === 'KeyI') return startAction('dive', dive);
+      if (code === 'KeyE') {
+        if (player.stamina >= SKILL_COST) { player.stamina -= SKILL_COST; startAction('energy', energy[0], 0); log('E accepted — stamina was full'); }
+        else log('E denied — stamina must be full');
+      }
+    }
+    function startDodge() {
+      player.state = 'dodge'; player.action = { type: 'dodge', t: 0 }; player.queued = false; player.invuln = .22; player.dodgeCd = .65; shake = Math.max(shake, 3);
+      log('Dodge cancel + i-frames');
+    }
+    function movementVector() {
+      const x = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+      const y = (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) - (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
+      const length = Math.hypot(x, y) || 1; return { x: x / length, y: y / length, active: Boolean(x || y) };
+    }
+    function resolveAttack(action) {
+      action.hit = true; action.hitCount = (action.hitCount || 0) + 1; player.hitFlash = .08; hitStop = .035; shake = Math.max(shake, action.type === 'dive' ? 12 : 6);
+      const targets = action.type === 'dive' ? enemies.filter(e => !e.dead && Math.abs(e.y - player.y) < 56 && (e.x - player.x) * player.facing > -35 && (e.x - player.x) * player.facing < action.data.range + e.r) : enemies.filter(e => !e.dead && distance(player, e) <= action.data.range + e.r);
+      if (!targets.length) return log(action.data.name + (action.type === 'dive' ? ' tick ' + action.hitCount + '/' + action.data.hitCount : '') + ' whiff');
+      for (const enemy of targets) {
+        enemy.hp = Math.max(0, enemy.hp - action.data.damage); enemy.stun = .22;
+        const dx = action.type === 'dive' ? player.facing : enemy.x - player.x, dy = action.type === 'dive' ? 0 : enemy.y - player.y, length = Math.hypot(dx, dy) || 1;
+        enemy.vx = dx / length * action.data.knockback; enemy.vy = dy / length * action.data.knockback;
+        if (action.type === 'launcher') { enemy.air = 42; enemy.airVel = 150; }
+        if (action.type === 'dive') { enemy.air = Math.max(enemy.air, 18); enemy.airVel = Math.max(enemy.airVel, 85); player.x += player.facing * 18; }
+        if (enemy.hp <= 0) { enemy.dead = true; log(enemy.id + 1 + ' defeated'); }
+      }
+      log(action.data.name + (action.type === 'dive' ? ' tick ' + action.hitCount + '/' + action.data.hitCount : '') + ' hit ×' + targets.length + '  |  KB ' + action.data.knockback);
+    }
+    function updatePlayer(dt) {
+      player.invuln = Math.max(0, player.invuln - dt); player.dodgeCd = Math.max(0, player.dodgeCd - dt); player.hitFlash = Math.max(0, player.hitFlash - dt);
+      if (player.hp <= 0) { player.state = 'dead'; player.action = null; return; }
+      if (player.state === 'dodge') {
+        const move = movementVector(); const dx = move.active ? move.x : player.facing, dy = move.active ? move.y : 0;
+        player.x += dx * 360 * dt; player.y += dy * 360 * dt; player.action.t += dt; player.invuln = Math.max(player.invuln, .05);
+        if (player.action.t >= .22) player.state = 'idle'; return;
+      }
+      if (player.state === 'idle') {
+        const move = movementVector(); if (move.active) { player.x += move.x * 175 * dt; player.y += move.y * 175 * dt; if (Math.abs(move.x) > .1) player.facing = Math.sign(move.x); }
+        player.stamina = clamp(player.stamina + 24 * dt, 0, player.maxStamina);
+        return;
+      }
+      const action = player.action; action.t += dt;
+      if (action.type === 'ground' && pressed.has('KeyJ')) player.queued = true;
+      if (action.type === 'dive') {
+        while (action.hitCount < action.data.hitCount && action.t >= action.data.hitAt + action.hitCount * action.data.hitInterval) resolveAttack(action);
+      } else if (!action.hit && action.t >= action.data.hitAt) resolveAttack(action);
+      if (action.type === 'energy' && action.t >= action.data.duration) {
+        if (action.index < energy.length - 1) return startAction('energy', energy[action.index + 1], action.index + 1);
+        player.state = 'idle'; player.action = null; return;
+      }
+      if (action.t >= action.data.duration) {
+        if (action.type === 'ground' && player.queued && action.index < ground.length - 1) return startAction('ground', ground[action.index + 1], action.index + 1);
+        player.state = 'idle'; player.action = null; player.queued = false;
+      }
+    }
+    function updateEnemies(dt) {
+      for (const enemy of enemies) {
+        if (enemy.dead) continue;
+        if (enemy.air > 0) { enemy.airVel -= 330 * dt; enemy.air += enemy.airVel * dt; if (enemy.air <= 0) { enemy.air = 0; enemy.airVel = 0; } }
+        enemy.x += enemy.vx * dt; enemy.y += enemy.vy * dt; enemy.vx *= Math.pow(.05, dt); enemy.vy *= Math.pow(.05, dt); enemy.stun = Math.max(0, enemy.stun - dt); enemy.attackCd = Math.max(0, enemy.attackCd - dt);
+        if (enemy.stun > 0 || enemy.air > 0) continue;
+        const dx = player.x - enemy.x, dy = player.y - enemy.y, d = Math.hypot(dx, dy) || 1;
+        if (enemy.attackT > 0) {
+          enemy.attackT -= dt;
+          if (!enemy.attackFired && enemy.attackT <= .18) { enemy.attackFired = true; if (d < 105) { if (player.invuln <= 0) { player.hp = Math.max(0, player.hp - 10); player.hitFlash = .12; log('Enemy hit — dodge the red ring'); } else log('Perfect dodge — attack avoided'); } }
+          if (enemy.attackT <= 0) enemy.attackCd = 1.1; continue;
+        }
+        if (d > 74) { enemy.x += dx / d * 42 * dt; enemy.y += dy / d * 42 * dt; }
+        else if (enemy.attackCd <= 0) { enemy.attackT = .58; enemy.attackFired = false; }
+      }
+    }
+    function updateCamera(dt) {
+      const live = enemies.filter(e => !e.dead), focus = live.length ? live.reduce((sum, e) => ({ x: sum.x + e.x, y: sum.y + e.y }), { x: player.x, y: player.y }) : player;
+      if (live.length) { focus.x /= live.length + 1; focus.y /= live.length + 1; focus.x += player.x / (live.length + 1); focus.y += player.y / (live.length + 1); }
+      camera.x += (focus.x - camera.x) * Math.min(1, dt * 6); camera.y += (focus.y - camera.y) * Math.min(1, dt * 6); shake *= Math.pow(.001, dt);
+    }
+    function worldToScreen(x, y) { return { x: x - camera.x + innerWidth / 2 + (Math.random() - .5) * shake, y: y - camera.y + innerHeight / 2 + (Math.random() - .5) * shake }; }
+    function drawBar(x, y, w, h, value, max, color) { ctx.fillStyle = '#111a2b'; ctx.fillRect(x, y, w, h); ctx.fillStyle = color; ctx.fillRect(x, y, w * clamp(value / max, 0, 1), h); }
+    function draw() {
+      ctx.clearRect(0, 0, innerWidth, innerHeight); ctx.fillStyle = '#0d1727'; ctx.fillRect(0, 0, innerWidth, innerHeight);
+      const grid = 48, offsetX = ((-camera.x + innerWidth / 2) % grid + grid) % grid, offsetY = ((-camera.y + innerHeight / 2) % grid + grid) % grid;
+      ctx.strokeStyle = '#1b2b45'; ctx.lineWidth = 1; for (let x = offsetX; x < innerWidth; x += grid) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, innerHeight); ctx.stroke(); } for (let y = offsetY; y < innerHeight; y += grid) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(innerWidth, y); ctx.stroke(); }
+      for (const enemy of enemies) {
+        if (enemy.dead) continue; const p = worldToScreen(enemy.x, enemy.y), lift = enemy.air;
+        ctx.fillStyle = '#0008'; ctx.beginPath(); ctx.ellipse(p.x, p.y + 5, enemy.r + 5, 7, 0, 0, TAU); ctx.fill();
+        if (enemy.attackT > 0 && enemy.attackT < .38) { ctx.strokeStyle = enemy.attackT < .18 ? '#ff5365' : '#ffb34d'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(p.x, p.y - lift, 48, 0, TAU); ctx.stroke(); }
+        ctx.fillStyle = enemy.stun > 0 ? '#ffc261' : '#ed526b'; ctx.beginPath(); ctx.arc(p.x, p.y - lift, enemy.r, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p.x - 7, p.y - lift - 5, 3, 0, TAU); ctx.arc(p.x + 7, p.y - lift - 5, 3, 0, TAU); ctx.fill();
+        drawBar(p.x - 29, p.y - lift - 42, 58, 5, enemy.hp, enemy.maxHp, '#ff596d');
+      }
+      const pp = worldToScreen(player.x, player.y), diveTime = player.state === 'dive' && player.action ? player.action.t : 0, diveArc = player.state === 'dive' ? Math.sin(clamp(diveTime / dive.duration, 0, 1) * Math.PI) : 0, playerLift = player.state === 'dodge' ? -4 : player.state === 'dive' ? -16 - diveArc * 44 : 0;
+      ctx.fillStyle = '#0008'; ctx.beginPath(); ctx.ellipse(pp.x, pp.y + 7, 23, 8, 0, 0, TAU); ctx.fill();
+      ctx.save(); ctx.translate(pp.x, pp.y + playerLift); ctx.rotate(player.state === 'dodge' ? player.facing * .4 : player.state === 'dive' ? diveTime * 18 : 0); ctx.fillStyle = player.invuln > 0 ? '#d7fbff' : player.hitFlash > 0 ? '#fff' : '#5ebcff'; ctx.beginPath(); ctx.moveTo(player.facing * 29, 0); ctx.lineTo(-18, -17); ctx.lineTo(-12, 17); ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#b9edff'; ctx.stroke(); ctx.restore();
+      if (player.state === 'dive') { ctx.strokeStyle = '#7eeeff99'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(pp.x, pp.y - 12, 42 + Math.sin(diveTime * 25) * 7, 0, TAU); ctx.stroke(); }
+      if (player.state === 'dodge') { ctx.strokeStyle = '#8df7ff99'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(pp.x, pp.y, 31, 0, TAU); ctx.stroke(); }
+    }
+    function updateHud() {
+      hpFill.style.width = player.hp + '%'; staminaFill.style.width = player.stamina + '%'; hpText.textContent = Math.ceil(player.hp) + ' / ' + player.maxHp; staminaText.textContent = Math.ceil(player.stamina) + ' / ' + player.maxStamina;
+      comboText.textContent = player.state === 'ground' ? 'GROUND ' + (player.action.index + 1) + ' / 4' : player.state === 'energy' ? 'ENERGY E' + (player.action.index + 1) + ' / 4' : player.state === 'dodge' ? 'DODGE // INVULNERABLE' : '';
+      statusText.textContent = player.hp <= 0 ? 'Down — press R to reset' : player.stamina >= SKILL_COST ? 'E READY — full stamina' : player.state === 'idle' ? 'Recovering stamina…' : player.state.toUpperCase(); statusText.classList.toggle('ready', player.stamina >= SKILL_COST);
+    }
+    function consumePressed() { for (const code of ['KeyJ','KeyK','KeyI','KeyE','Space','KeyR']) if (pressed.has(code)) { if (code === 'KeyR') spawnWave(); else tryStartAction(code); pressed.delete(code); } }
+    function loop(now) {
+      const dt = Math.min(.033, (now - last) / 1000); last = now; consumePressed();
+      if (hitStop > 0) hitStop -= dt; else { updatePlayer(dt); updateEnemies(dt); updateCamera(dt); }
+      draw(); updateHud(); requestAnimationFrame(loop);
+    }
+    function selfTest() {
+      console.assert(clamp(140, 0, 100) === 100, 'clamp upper bound'); console.assert(clamp(-4, 0, 100) === 0, 'clamp lower bound');
+      console.assert(SKILL_COST === 100 && player.stamina >= SKILL_COST, 'E starts full'); console.assert(player.invuln === 0, 'initially vulnerable');
+      log('Self-test passed — core timing guards are alive');
+    }
+    spawnWave(); if (location.search.includes('selftest')) selfTest(); requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

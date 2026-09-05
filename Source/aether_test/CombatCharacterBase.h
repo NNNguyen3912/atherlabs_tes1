@@ -100,6 +100,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Combat|Reaction")
 	void ApplyCombatLaunch(float LaunchZ);
 
+	/** Apply a normalized horizontal impulse and optional lift without requiring a new ability. */
+	UFUNCTION(BlueprintCallable, Category = "Combat|Reaction")
+	void ApplyCombatKnockback(FVector Direction, float HorizontalStrength, float LiftZ = 0.f);
+
 	/** BP callback de them VFX/camera shake sau khi phan ung hit mac dinh da chay. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "GAS")
 	void OnMeleeHitReceived(ACombatCharacterBase* Attacker);
@@ -114,6 +118,24 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "GAS")
 	bool TryPayStamina(float Cost);
+
+	/** Skill gate: requires one complete four-hit E combo worth of stamina. */
+	UFUNCTION(BlueprintCallable, Category = "GAS")
+	bool TryPayFullStamina();
+
+	/** Restores a bounded amount of stamina after a confirmed player hit. */
+	UFUNCTION(BlueprintCallable, Category = "GAS")
+	void RestoreStamina(float Amount);
+
+	/** Tunable resource budget for one four-hit E combo. Full stamina therefore allows two uses. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat|Stamina", meta = (ClampMin = "0.0"))
+	float SkillComboTotalCost = 50.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat|Stamina", meta = (ClampMin = "1"))
+	int32 SkillComboHitCount = 4;
+
+	UFUNCTION(BlueprintPure, Category = "Combat|Stamina")
+	float GetSkillComboHitCost() const;
 
 	/** Apply 1 GE len chinh minh (poison DoT, buff...). Tra handle de remove som neu can. */
 	UFUNCTION(BlueprintCallable, Category = "GAS")
@@ -140,10 +162,16 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+	virtual void Landed(const FHitResult& Hit) override;
 	virtual void PossessedBy(AController* NewController) override;
 	virtual void OnRep_Controller() override;
 
 	void InitAbilitySystem();
+	/** Blueprints created before the AttributeSet defaults existed can serialize Health=0.
+	 *  Repair only missing values at spawn so a live player never becomes silently dead on first hit. */
+	void EnsureInitialAttributes();
+	void InitializePlayerStartingStamina();
 
 	void HandleHealthChanged(const FOnAttributeChangeData& Data);
 	void HandleStaminaChanged(const FOnAttributeChangeData& Data);
@@ -153,12 +181,18 @@ protected:
 	void RegisterConfirmedHit();
 	void ResetCombo();
 	void CreatePlayerHUDIfNeeded();
+	void UpdateCombatFacing(float DeltaSeconds);
+	ACombatCharacterBase* FindNearestCombatTarget() const;
 
 	/** Keeps an optional world-space/screen-space HPBar widget in sync with GAS. */
 	void UpdateHealthWidgets(float NewHealth, float NewMaxHealth);
 
 	/** World time at which this character may deal the next cooldown-protected melee hit. */
 	float NextMeleeDamageTime = 0.f;
+
+	/** Exact authored or dynamic montage started by the latest launcher. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveLaunchReactionMontage;
 
 	/** Opt-in native death hardening. Bat tren BP_Enemy de Tick AI khong the chase sau khi chet. */
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|Death")
@@ -180,6 +214,19 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|UI", meta = (ClampMin = "0.1"))
 	float ComboResetDelay = 2.f;
 
+	/** Soft lock-on: while an attack montage is active, turn toward one nearby living enemy. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Targeting")
+	bool bAutoFaceNearestEnemy = true;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Targeting", meta = (ClampMin = "100.0"))
+	float AutoFaceRange = 1600.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Targeting", meta = (ClampMin = "1.0"))
+	float AutoFaceTurnSpeed = 14.f;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Combat|Targeting")
+	TObjectPtr<ACombatCharacterBase> CurrentCombatTarget;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Combat|UI")
 	int32 ComboCount = 0;
 
@@ -187,4 +234,8 @@ protected:
 	TObjectPtr<UCombatPlayerHUDWidget> PlayerHUD;
 
 	FTimerHandle ComboResetTimer;
+
+	/** BeginPlay may run before possession; this prevents a later possession callback from resetting combat stamina. */
+	UPROPERTY(Transient)
+	bool bPlayerStartingStaminaApplied = false;
 };

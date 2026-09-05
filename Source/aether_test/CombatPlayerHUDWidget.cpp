@@ -6,6 +6,7 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/ProgressBar.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
@@ -13,8 +14,8 @@
 
 namespace
 {
-	constexpr float HUDWidth = 360.f;
-	constexpr float BarHeight = 18.f;
+	constexpr float HUDWidth = 420.f;
+	constexpr float BarHeight = 22.f;
 
 	UTextBlock* AddText(UWidgetTree* WidgetTree, UVerticalBox* Parent, const FText& Text, float PaddingTop = 0.f)
 	{
@@ -37,9 +38,11 @@ namespace
 		Style.FillImage.TintColor = FSlateColor(FillColor);
 		Bar->SetWidgetStyle(Style);
 		Bar->SetPercent(1.f);
-		if (UVerticalBoxSlot* Slot = Parent->AddChildToVerticalBox(Bar))
+		USizeBox* BarSize = WidgetTree->ConstructWidget<USizeBox>();
+		BarSize->SetHeightOverride(BarHeight);
+		BarSize->SetContent(Bar);
+		if (UVerticalBoxSlot* Slot = Parent->AddChildToVerticalBox(BarSize))
 		{
-			Slot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
 			Slot->SetPadding(FMargin(0.f, 0.f, 0.f, 6.f));
 		}
 		return Bar;
@@ -58,10 +61,17 @@ void UCombatPlayerHUDWidget::InitializeForCharacter(ACombatCharacterBase* InChar
 	BindToCharacter();
 }
 
+TSharedRef<SWidget> UCombatPlayerHUDWidget::RebuildWidget()
+{
+	// RebuildWidget creates the Slate tree immediately. Build the native UMG
+	// hierarchy before Super() takes RootWidget; NativeConstruct is too late.
+	BuildLayout();
+	return Super::RebuildWidget();
+}
+
 void UCombatPlayerHUDWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
-	BuildLayout();
 	BindToCharacter();
 }
 
@@ -86,10 +96,10 @@ void UCombatPlayerHUDWidget::BuildLayout()
 	Background->SetPadding(FMargin(14.f, 10.f));
 	if (UCanvasPanelSlot* BackgroundSlot = Root->AddChildToCanvas(Background))
 	{
-		BackgroundSlot->SetAnchors(FAnchors(0.f, 1.f));
-		BackgroundSlot->SetAlignment(FVector2D(0.f, 1.f));
-		BackgroundSlot->SetPosition(FVector2D(28.f, -34.f));
-		BackgroundSlot->SetSize(FVector2D(HUDWidth, 142.f));
+		BackgroundSlot->SetAnchors(FAnchors(0.f, 0.f));
+		BackgroundSlot->SetAlignment(FVector2D(0.f, 0.f));
+		BackgroundSlot->SetPosition(FVector2D(28.f, 28.f));
+		BackgroundSlot->SetSize(FVector2D(HUDWidth, 180.f));
 	}
 
 	UVerticalBox* Panel = WidgetTree->ConstructWidget<UVerticalBox>();
@@ -99,6 +109,8 @@ void UCombatPlayerHUDWidget::BuildLayout()
 	HealthBar = AddBar(WidgetTree, Panel, FLinearColor(0.92f, 0.12f, 0.16f, 1.f));
 	StaminaText = AddText(WidgetTree, Panel, FText::FromString(TEXT("STAMINA 0 / 0")), 1.f);
 	StaminaBar = AddBar(WidgetTree, Panel, FLinearColor(0.13f, 0.78f, 0.35f, 1.f));
+	SkillReadyText = AddText(WidgetTree, Panel, FText::FromString(TEXT("E NOT READY")), 1.f);
+	SkillReadyText->SetColorAndOpacity(FSlateColor(FLinearColor(0.58f, 0.62f, 0.68f, 1.f)));
 	ComboText = AddText(WidgetTree, Panel, FText::GetEmpty(), 3.f);
 	ComboText->SetColorAndOpacity(FSlateColor(FLinearColor(1.f, 0.78f, 0.16f, 1.f)));
 	ComboText->SetVisibility(ESlateVisibility::Collapsed);
@@ -162,6 +174,16 @@ void UCombatPlayerHUDWidget::HandleHealthChanged(float NewValue, float MaxValue)
 void UCombatPlayerHUDWidget::HandleStaminaChanged(float NewValue, float MaxValue)
 {
 	SetBar(StaminaBar, StaminaText, NewValue, MaxValue, NSLOCTEXT("CombatHUD", "Stamina", "STAMINA"));
+	if (SkillReadyText)
+	{
+		const bool bReady = MaxValue > 0.f && NewValue + KINDA_SMALL_NUMBER >= MaxValue;
+		SkillReadyText->SetText(bReady
+			? NSLOCTEXT("CombatHUD", "SkillReady", "E READY")
+			: NSLOCTEXT("CombatHUD", "SkillNotReady", "E NOT READY"));
+		SkillReadyText->SetColorAndOpacity(FSlateColor(bReady
+			? FLinearColor(1.f, 0.78f, 0.16f, 1.f)
+			: FLinearColor(0.58f, 0.62f, 0.68f, 1.f)));
+	}
 }
 
 void UCombatPlayerHUDWidget::HandleComboChanged(int32 NewComboCount)

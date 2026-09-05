@@ -35,6 +35,18 @@ void UANS_MeleeHitbox::NotifyBegin(USkeletalMeshComponent* MeshComp, UAnimSequen
 		return;
 	}
 
+	if (Attacker && Attacker->IsPlayerControlled())
+	{
+		if (MinimumStaminaOnBegin > 0.f && Attacker->GetStamina() + KINDA_SMALL_NUMBER < MinimumStaminaOnBegin)
+		{
+			return;
+		}
+		if (StaminaCostOnBegin > 0.f && !Attacker->TryPayStamina(StaminaCostOnBegin))
+		{
+			return;
+		}
+	}
+
 	FHitboxState& State = ActiveStates.FindOrAdd(MeshComp);
 	State.HitActors.Reset();
 	State.PrevPos = GetHitboxLocation(MeshComp);
@@ -92,7 +104,7 @@ void UANS_MeleeHitbox::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenc
 		// Poison/launch chi di kem cu danh THANH CONG — attacker chet giua chung
 		// hay nan nhan da chet thi khong duoc dinh gi them
 		const bool bIsLauncher = LaunchZ > 0.f;
-		if (!Attacker->ApplyDamageToTarget(Victim, Damage, !bIsLauncher))
+		if (!Attacker->ApplyDamageToTarget(Victim, Damage, !bIsLauncher && bPlayHitReaction))
 		{
 			continue;
 		}
@@ -104,9 +116,21 @@ void UANS_MeleeHitbox::NotifyTick(USkeletalMeshComponent* MeshComp, UAnimSequenc
 		{
 			Victim->ApplyEffectToSelf(ExtraEffectOnHit);
 		}
+		if (StaminaGainOnConfirmedHit > 0.f && Attacker->IsPlayerControlled())
+		{
+			Attacker->RestoreStamina(StaminaGainOnConfirmedHit);
+		}
 		if (bIsLauncher && !Victim->bIsDead)
 		{
 			Victim->ApplyCombatLaunch(LaunchZ);
+		}
+		if (HorizontalKnockback > 0.f && !Victim->bIsDead)
+		{
+			FVector KnockbackDirectionVector = KnockbackDirection == ECombatKnockbackDirection::AttackerForward
+				? Attacker->GetActorForwardVector()
+				: Victim->GetActorLocation() - Attacker->GetActorLocation();
+			KnockbackDirectionVector.Z = 0.f;
+			Victim->ApplyCombatKnockback(KnockbackDirectionVector, HorizontalKnockback, KnockbackLiftZ);
 		}
 	}
 }

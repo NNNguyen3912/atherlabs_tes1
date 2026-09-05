@@ -21,6 +21,7 @@ public:
 	void InitializeForCharacter(ACombatCharacterBase* InCharacter);
 
 protected:
+	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 
@@ -54,6 +55,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextBlock> StaminaText;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> SkillReadyText;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextBlock> ComboText;

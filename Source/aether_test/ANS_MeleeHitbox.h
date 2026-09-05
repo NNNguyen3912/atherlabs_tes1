@@ -8,6 +8,13 @@
 
 class ACombatCharacterBase;
 
+UENUM(BlueprintType)
+enum class ECombatKnockbackDirection : uint8
+{
+	AwayFromAttacker UMETA(DisplayName = "Away From Attacker"),
+	AttackerForward UMETA(DisplayName = "Attacker Forward")
+};
+
 /**
  * Hitbox don danh: dat dai notify quanh frame cham cua montage.
  * Sweep sphere theo socket giua 2 tick — moi nan nhan chi dinh 1 lan cho moi lan phat.
@@ -33,6 +40,34 @@ public:
 	/** >0 thi hat nan nhan len (launcher L2 dung 650) */
 	UPROPERTY(EditAnywhere, Category = "Hitbox")
 	float LaunchZ = 0.f;
+
+	/** Horizontal displacement applied after a successful hit. Zero preserves the old behavior. */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Reaction", meta = (ClampMin = "0.0"))
+	float HorizontalKnockback = 0.f;
+
+	/** Optional vertical lift applied together with horizontal knockback. */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Reaction", meta = (ClampMin = "0.0"))
+	float KnockbackLiftZ = 0.f;
+
+	/** Direction used by horizontal knockback: away from the attacker or along its forward axis. */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Reaction")
+	ECombatKnockbackDirection KnockbackDirection = ECombatKnockbackDirection::AwayFromAttacker;
+
+	/** Disable the default hit-reaction montage for multi-hit or scripted impact windows. */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Reaction")
+	bool bPlayHitReaction = true;
+
+	/** Optional stamina cost paid when this authored hit window starts (E uses 12.5 x 4). */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Stamina", meta = (ClampMin = "0.0"))
+	float StaminaCostOnBegin = 0.f;
+
+	/** Optional minimum stamina required before this window can start (S4 uses 50). */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Stamina", meta = (ClampMin = "0.0"))
+	float MinimumStaminaOnBegin = 0.f;
+
+	/** Stamina restored only after this window confirms real damage on a player-controlled attacker. */
+	UPROPERTY(EditAnywhere, Category = "Hitbox|Stamina", meta = (ClampMin = "0.0"))
+	float StaminaGainOnConfirmedHit = 0.f;
 
 	/** GE phu ap them len nan nhan khi trung (enemy gan GE_PoisonDoT de doc player) */
 	UPROPERTY(EditAnywhere, Category = "Hitbox")

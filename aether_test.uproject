@@ -37,6 +37,14 @@
 		{
 			"Name": "RemoteControl",
 			"Enabled": true
+		},
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "UE_MCP_Bridge",
+			"Enabled": false
 		}
 	]
 }
